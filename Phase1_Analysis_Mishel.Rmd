@@ -1,0 +1,265 @@
+---
+title: "Product Failure Prediction - Phase 1 Exploratory Analysis"
+author: "Mishel Netto"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 6)
+```
+
+# Load Libraries and Data
+
+```{r}
+library(tidyverse)   
+library(ggplot2)     
+library(knitr)      
+
+theme_set(theme_minimal())
+
+train <- read_csv("~/Documents/project/train copy.csv")
+```
+
+# 1. Dataset Overview
+
+```{r}
+cat("Dataset contains:", nrow(train), "observations and", ncol(train), "variables\n\n")
+str(train)
+```
+
+**Analysis:** 
+
+The dataset contains 26,570 product records with 26 variables. These include 1 target variable (failure: Yes/No), categorical variables (product_code with 5 types, material attributes), numerical variables (loading, 18 measurements), and 1 identifier. This variety of variable types means we'll analyze categorical and numerical predictors differently to identify the strongest failure predictors.
+
+# 2. Target Variable: Product Failure
+
+```{r}
+# Failure distribution
+table(train$failure)
+prop.table(table(train$failure)) * 100
+```
+
+```{r fig.cap="Figure 1: Distribution of Product Failures"}
+ggplot(train, aes(x = failure, fill = failure)) +
+  geom_bar(alpha = 0.8) +
+  geom_text(stat = 'count', 
+            aes(label = paste0(..count.., "\n(", 
+                              sprintf("%.1f%%", ..count../sum(..count..)*100), ")")), 
+            vjust = -0.5, size = 5) +
+  scale_fill_manual(values = c("No" = "#2ecc71", "Yes" = "#e74c3c"),
+                    name = "Failure Status") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Distribution of Product Failures",
+       subtitle = "Overall Failure Rate: 21.3%",
+       x = "Failure Status", y = "Number of Products") +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 14, face = "bold"),
+        axis.text = element_text(size = 11))
+```
+
+**Analysis:**
+
+Out of 26,570 products: **20,921 did NOT fail (78.7%)** and **5,649 FAILED (21.3%)**. This represents a significant class imbalance with roughly 3.7 non-failures for every 1 failure. This is realistic for manufacturing (we expect most products to work), but it means we can't just use accuracy as a metric in Phase 2 - a model predicting "No" every time would be 78.7% accurate but useless. We'll need metrics like F1-score or AUC-ROC instead.
+
+# 3. Missing Data Analysis
+
+```{r}
+# Calculate missing data for each variable
+missing_data <- data.frame(
+  Variable = names(train),
+  Missing_Percent = round(colSums(is.na(train)) / nrow(train) * 100, 2)
+) %>% 
+  filter(Missing_Percent > 0) %>%
+  arrange(desc(Missing_Percent))
+
+kable(missing_data, row.names = FALSE)
+```
+
+```{r fig.cap="Figure 2: Missing Data Pattern", fig.height=7}
+ggplot(missing_data, 
+       aes(x = reorder(Variable, Missing_Percent), y = Missing_Percent)) +
+  geom_bar(stat = 'identity', fill = "#3498db", alpha = 0.8) +
+  geom_text(aes(label = paste0(Missing_Percent, "%")), 
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title = "Missing Data by Variable",
+       subtitle = "Progressive missingness pattern in measurement variables",
+       x = "Variable Name", y = "Percentage Missing (%)") +
+  ylim(0, max(missing_data$Missing_Percent) * 1.15) +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+```
+
+**Analysis:**
+
+We observe a **progressive missingness pattern**: measurement_3 has only 1.43% missing while measurement_17 has 8.60% missing. This systematic increase suggests later measurements may be harder to obtain (time/cost constraints, equipment limitations, or product degradation during testing). The good news: categorical variables (product_code, attributes, failure) have zero missing values, and loading has minimal missingness (0.94%). For Phase 2, we'll need to handle these missing values through imputation, and the missingness pattern itself might be informative.
+
+# 4. Product Code Analysis
+
+```{r}
+# Calculate failure rates by product code
+product_summary <- train %>%
+  group_by(product_code) %>%
+  summarise(
+    Total = n(),
+    Failures = sum(failure == "Yes"),
+    Failure_Rate = round(mean(failure == "Yes") * 100, 2)
+  ) %>%
+  arrange(desc(Failure_Rate))
+
+kable(product_summary)
+```
+
+```{r fig.cap="Figure 3: Failure Rate by Product Code", fig.width=10}
+train %>%
+  group_by(product_code, failure) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(product_code) %>%
+  mutate(percentage = count/sum(count) * 100) %>%
+  ggplot(aes(x = product_code, y = percentage, fill = failure)) +
+  geom_bar(stat = 'identity', position = 'dodge', alpha = 0.8) +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("No" = "#2ecc71", "Yes" = "#e74c3c")) +
+  labs(title = "Failure Rate by Product Code",
+       x = "Product Code", y = "Percentage (%)") +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+```
+
+**Analysis:**
+
+Product code shows meaningful variation: Product A has the highest failure rate (22.73%) while Product B has the lowest (20.04%), representing a 2.69 percentage point spread or about 13% relative difference in failure risk. If you were a production manager, you'd investigate why Product A fails 13% more often - this could point to design differences, manufacturing process variations, or material quality issues. This variable will be useful in Phase 2 models, especially when combined with other variables through interaction effects.
+
+# 5. Loading Variable - STRONGEST PREDICTOR
+
+```{r}
+# Summary statistics for loading by failure status
+loading_stats <- train %>%
+  group_by(failure) %>%
+  summarise(
+    Mean = round(mean(loading, na.rm = TRUE), 2),
+    Median = round(median(loading, na.rm = TRUE), 2),
+    Std_Dev = round(sd(loading, na.rm = TRUE), 2)
+  )
+
+kable(loading_stats)
+
+# Calculating the difference
+diff <- loading_stats$Mean[2] - loading_stats$Mean[1]
+pct <- round((diff / loading_stats$Mean[1]) * 100, 1)
+cat("\nFailed products have", diff, "units higher loading (", pct, "% increase)\n")
+```
+
+```{r fig.cap="Figure 4: Loading Distribution by Failure Status"}
+ggplot(train %>% filter(!is.na(loading)), 
+       aes(x = failure, y = loading, fill = failure)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.7, width = 0.3, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("No" = "#2ecc71", "Yes" = "#e74c3c")) +
+  labs(title = "Loading Distribution by Failure Status",
+       subtitle = "Failed products show significantly higher loading values",
+       x = "Failure Status", y = "Loading Value") +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+**Analysis:**
+
+This is our **MOST IMPORTANT FINDING**. Failed products average 137.51 loading units vs 125.21 for non-failed products - a difference of 12.30 units (9.8% higher). This is the strongest individual predictor we found because: (1) It shows the clearest separation between failure groups, (2) The relationship makes intuitive sense (higher stress/load → higher failure risk), and (3) As we'll see next, this pattern holds across ALL product codes, making it robust and reliable. For Phase 2, loading should be the foundation of our models - use it directly, in interaction terms, and create derived features like loading categories.
+
+# 6. Loading × Product Code Interaction
+
+```{r}
+# Average loading by product and failure status
+train %>%
+  filter(!is.na(loading)) %>%
+  group_by(product_code, failure) %>%
+  summarise(Avg_Loading = round(mean(loading), 2), .groups = 'drop') %>%
+  pivot_wider(names_from = failure, values_from = Avg_Loading) %>%
+  mutate(Difference = Yes - No) %>%
+  kable()
+```
+
+```{r fig.cap="Figure 5: Loading by Product Code and Failure", fig.width=10}
+ggplot(train %>% filter(!is.na(loading)), 
+       aes(x = product_code, y = loading, fill = failure)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("No" = "#2ecc71", "Yes" = "#e74c3c")) +
+  labs(title = "Loading Distribution by Product Code and Failure Status",
+       subtitle = "The loading effect is consistent across all product types",
+       x = "Product Code", y = "Loading Value") +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+```
+
+**Analysis:**
+
+The loading effect is **consistent across all product codes** - every product type shows failures with 11-13 units higher loading. This tight range (only 1.68 units variation) proves the relationship is robust and dependable, not just a quirk of one product type. This consistency suggests a fundamental physical/engineering relationship common to all product designs: higher loading leads to higher failure risk regardless of product type. For modeling, we can confidently use loading across all products, though product_code × loading interactions may still add value.
+
+# 7. Material Attributes
+
+```{r}
+# Attribute 0 and 1 analysis
+train %>%
+  group_by(attribute_0) %>%
+  summarise(Failure_Rate = round(mean(failure == "Yes") * 100, 2)) %>%
+  kable(caption = "Attribute 0 Failure Rates")
+
+train %>%
+  group_by(attribute_1) %>%
+  summarise(Failure_Rate = round(mean(failure == "Yes") * 100, 2)) %>%
+  kable(caption = "Attribute 1 Failure Rates")
+```
+
+**Analysis:**
+
+Material attributes show modest variation (1-2 percentage points) in failure rates. Attribute 0: material_7 (21.56%) vs material_5 (20.04%). Attribute 1: ranges from 20.70% to 21.90%. While smaller than product code or loading effects, these might still be useful in Phase 2 when combined with other features. The differences could capture material quality variations or performance under different conditions.
+
+# 8. Measurement Variables
+
+```{r}
+# Analyze measurement_17 as representative example
+train %>%
+  group_by(failure) %>%
+  summarise(
+    Mean_M17 = round(mean(measurement_17, na.rm = TRUE), 2),
+    Mean_M0 = round(mean(measurement_0, na.rm = TRUE), 2),
+    Mean_M1 = round(mean(measurement_1, na.rm = TRUE), 2)
+  ) %>%
+  kable(caption = "Selected Measurement Variables by Failure")
+```
+
+```{r fig.cap="Figure 6: Measurement 17 Distribution", fig.width=10}
+ggplot(train %>% filter(!is.na(measurement_17)), 
+       aes(x = measurement_17, fill = failure)) +
+  geom_histogram(alpha = 0.6, bins = 50, position = 'identity') +
+  scale_fill_manual(values = c("No" = "#2ecc71", "Yes" = "#e74c3c")) +
+  labs(title = "Measurement 17 Distribution by Failure Status",
+       x = "Measurement 17 Value", y = "Frequency") +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+```
+
+**Analysis:**
+
+Measurement variables show mixed patterns. Discrete measurements (0, 1, 2) show minimal differences between groups (< 0.3 units). Continuous measurements like measurement_17 show small differences (709.33 vs 699.10 = 10.23 units or 1.5%), much smaller than loading's 9.8% effect. Individual measurements have limited predictive power, but they might be valuable in combination. 
+
+# Summary of Key Findings
+
+## Priority Ranking of Predictors:
+
+**1. Loading Variable** (HIGHEST PRIORITY)
+- Effect: 9.8% higher in failed products
+- Consistent across all product codes
+- Clear, intuitive relationship
+
+**2. Product Code** (MODERATE PRIORITY)
+- Effect: 2.7 percentage point range (20.0% to 22.7%)
+- Captures design differences
+
+**3. Material Attributes** (LOWER PRIORITY)
+- Effect: 1-2 percentage point variation
+- Can be included for fine-tuning
+
+**4. Measurements** (MIXED PRIORITY)
+- Effect: Small individually (1-2%)
+- Challenges: Progressive missingness up to 8.6%
+- Can create aggregate features
